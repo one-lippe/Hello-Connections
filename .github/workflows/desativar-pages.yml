@@ -1,0 +1,102 @@
+name: Desativar GitHub Pages apos 15 dias
+
+on:
+  schedule:
+    # roda todo dia as 12:00 UTC (09:00 no horario de Brasilia)
+    - cron: "0 12 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  desativar:
+    runs-on: ubuntu-latest
+    env:
+      TOKEN: ${{ secrets.PAGES_DISABLE_TOKEN }}
+      REPO: ${{ github.repository }}
+      ALVO: "2026-08-14"
+    steps:
+      - name: Verifica o prazo
+        id: check
+        run: |
+          HOJE=$(date -u +%F)
+          echo "Data de hoje (UTC): $HOJE"
+          echo "Data alvo: $ALVO"
+          if [[ "$HOJE" < "$ALVO" ]]; then
+            echo "Ainda nao chegou o prazo. Nada a fazer."
+            echo "vencido=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Prazo atingido."
+            echo "vencido=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Desativa o GitHub Pages
+        if: steps.check.outputs.vencido == 'true'
+        run: |
+          HTTP_CODE=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
+            -X DELETE \
+            -H "Authorization: token $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/pages")
+          echo "HTTP $HTTP_CODE"
+          cat /tmp/resp.json || true
+          if [[ "$HTTP_CODE" != "204" && "$HTTP_CODE" != "404" ]]; then
+            echo "Falha ao desativar o Pages."
+            exit 1
+          fi
+          echo "Pages desativado (ou ja estava desativado)."
+
+      - name: Troca o conteudo por uma pagina de proposta expirada
+        if: steps.check.outputs.vencido == 'true'
+        run: |
+          cat > /tmp/index.html << 'HTMLEOF'
+          <!DOCTYPE html>
+          <html lang="pt-BR">
+          <head><meta charset="UTF-8"><title>Proposta expirada</title>
+          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <style>
+          body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#071420;color:#f2f6f9;font-family:Arial,Helvetica,sans-serif;text-align:center;padding:24px}
+          div{max-width:520px}
+          h1{font-size:28px;margin-bottom:12px}
+          p{color:rgba(242,246,249,.6);font-size:16px;line-height:1.5}
+          </style></head>
+          <body>
+          <div>
+          <h1>Esta proposta expirou</h1>
+          <p>O prazo de visualizacao desta proposta comercial chegou ao fim. Entre em contato com a Mare Alta para receber uma nova via.</p>
+          </div>
+          </body>
+          </html>
+          HTMLEOF
+
+          curl -s -H "Authorization: token $TOKEN" \
+            "https://api.github.com/repos/$REPO/contents/index.html" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin).get('sha',''))" > /tmp/sha.txt
+
+          python3 - << 'PYEOF'
+          import base64, json, os, urllib.request
+
+          token = os.environ["TOKEN"]
+          repo = os.environ["REPO"]
+          content = base64.b64encode(open("/tmp/index.html", "rb").read()).decode()
+          sha = open("/tmp/sha.txt").read().strip()
+
+          payload = {
+              "message": "Proposta expirada apos 15 dias no ar",
+              "content": content,
+              "branch": "main",
+          }
+          if sha:
+              payload["sha"] = sha
+
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/{repo}/contents/index.html",
+              data=json.dumps(payload).encode(),
+              method="PUT",
+              headers={
+                  "Authorization": f"token {token}",
+                  "Accept": "application/vnd.github+json",
+                  "Content-Type": "application/json",
+              },
+          )
+          r = urllib.request.urlopen(req, timeout=30)
+          print(r.status)
+          PYEOF
